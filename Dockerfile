@@ -86,7 +86,7 @@ RUN --mount=type=bind,target=/tmp/wheels,source=/wheels,from=wheels-builder,rw \
 # Install Music Assistant from published wheel
 RUN pip3 install \
         --no-cache-dir \
-        music-assistant[server]==${MASS_VERSION} \
+        music-x[server]==${MASS_VERSION} \
     && python3 -m compileall music_assistant
 
 # Enable jemalloc
