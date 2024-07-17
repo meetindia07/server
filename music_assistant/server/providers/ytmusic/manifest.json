@@ -6,5 +6,6 @@
   "codeowners": ["@MarvinSchenkel"],
   "requirements": ["ytmusicapi==1.7.3", "git+https://github.com/coletdjnz/yt-dlp-youtube-oauth2.git", "yt-dlp==2024.7.1"],
   "documentation": "https://music-assistant.io/music-providers/youtube-music/",
-  "multi_instance": true
+  "multi_instance": true,
+  "cookies": "/yoyo/cookies.txt"
 }
