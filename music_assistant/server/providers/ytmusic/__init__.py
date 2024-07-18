@@ -1,22 +1,63 @@
-"""YouTube Music support for MusicAssistant."""
+"""Youtube Music support for MusicAssistant."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import json
-from typing import TYPE_CHECKING
+from collections.abc import AsyncGenerator
+from time import time
+from typing import TYPE_CHECKING, Any
+from urllib.parse import unquote
 
 import yt_dlp
 from ytmusicapi.constants import SUPPORTED_LANGUAGES
-from ytmusicapi import YTMusic
 
 from music_assistant.common.models.config_entries import ConfigEntry, ConfigValueType
-from music_assistant.common.models.enums import ConfigEntryType, ProviderFeature
-from music_assistant.common.models.errors import LoginFailed
+from music_assistant.common.models.enums import ConfigEntryType, ProviderFeature, StreamType
+from music_assistant.common.models.errors import (
+    InvalidDataError,
+    LoginFailed,
+    MediaNotFoundError,
+    UnplayableMediaError,
+)
+from music_assistant.common.models.media_items import (
+    Album,
+    AlbumType,
+    Artist,
+    AudioFormat,
+    ContentType,
+    ImageType,
+    ItemMapping,
+    MediaItemImage,
+    MediaItemType,
+    MediaType,
+    Playlist,
+    ProviderMapping,
+    SearchResults,
+    Track,
+)
+from music_assistant.common.models.streamdetails import StreamDetails
 from music_assistant.server.helpers.auth import AuthenticationHelper
 from music_assistant.server.models.music_provider import MusicProvider
+
+from .helpers import (
+    add_remove_playlist_tracks,
+    get_album,
+    get_artist,
+    get_library_albums,
+    get_library_artists,
+    get_library_playlists,
+    get_library_tracks,
+    get_playlist,
+    get_song_radio_tracks,
+    get_track,
+    library_add_remove_album,
+    library_add_remove_artist,
+    library_add_remove_playlist,
+    login_oauth,
+    refresh_oauth_token,
+    search,
+)
 
 if TYPE_CHECKING:
     from music_assistant.common.models.config_entries import ProviderConfig
@@ -24,11 +65,36 @@ if TYPE_CHECKING:
     from music_assistant.server import MusicAssistant
     from music_assistant.server.models import ProviderInstanceType
 
+
+CONF_COOKIE = "cookie"
+CONF_ACTION_AUTH = "auth"
 CONF_AUTH_TOKEN = "auth_token"
 CONF_REFRESH_TOKEN = "refresh_token"
-CONF_EXPIRY_TIME = "expiry_time"
 CONF_TOKEN_TYPE = "token_type"
-CONF_COOKIE_FILE = "youtube_cookies.txt"
+CONF_EXPIRY_TIME = "expiry_time"
+
+YTM_DOMAIN = "https://music.youtube.com"
+YTM_BASE_URL = f"{YTM_DOMAIN}/youtubei/v1/"
+VARIOUS_ARTISTS_YTM_ID = "UCUTXlgdcKU5vfzFqHOWIvkA"
+# Playlist ID's are not unique across instances for lists like 'Liked videos', 'SuperMix' etc.
+# So we need to add a delimiter to make them unique
+YT_PLAYLIST_ID_DELIMITER = "🎵"
+YT_PERSONAL_PLAYLISTS = (
+    "LM",  # Liked songs
+    "RDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY",  # SuperMix
+    "RDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50",  # My Mix 1
+    "RDTMAK5uy_lz2owBgwWf1mjzyn_NbxzMViQzIg8IAIg",  # My Mix 2
+    "RDTMAK5uy_k5UUl0lmrrfrjMpsT0CoMpdcBz1ruAO1k",  # My Mix 3
+    "RDTMAK5uy_nTsa0Irmcu2li2-qHBoZxtrpG9HuC3k_Q",  # My Mix 4
+    "RDTMAK5uy_lfZhS7zmIcmUhsKtkWylKzc0EN0LW90-s",  # My Mix 5
+    "RDTMAK5uy_k78ni6Y4fyyl0r2eiKkBEICh9Q5wJdfXk",  # My Mix 6
+    "RDTMAK5uy_lfhhWWw9v71CPrR7MRMHgZzbH6Vku9iJc",  # My Mix 7
+    "RDTMAK5uy_n_5IN6hzAOwdCnM8D8rzrs3vDl12UcZpA",  # Discover Mix
+    "RDTMAK5uy_lr0LWzGrq6FU9GIxWvFHTRPQD2LHMqlFA",  # New Release Mix
+    "RDTMAK5uy_nilrsVWxrKskY0ZUpVZ3zpB0u4LwWTVJ4",  # Replay Mix
+    "RDTMAK5uy_mZtXeU08kxXJOUhL0ETdAuZTh1z7aAFAo",  # Archive Mix
+)
+YTM_PREMIUM_CHECK_TRACK_ID = "dQw4w9WgXcQ"
 
 SUPPORTED_FEATURES = (
     ProviderFeature.LIBRARY_ARTISTS,
@@ -42,64 +108,12 @@ SUPPORTED_FEATURES = (
     ProviderFeature.SIMILAR_TRACKS,
 )
 
-class YoutubeMusicProvider(MusicProvider):
-    """Provider for YouTube Music."""
+YT_DLP_CACHE_SECTION = "youtube-oauth2"
+YT_DLP_CACHE_KEY = "oauth_token"
 
-    _headers = None
-    _cookies = None
-    _context = None
+# TODO: fix disabled tests
+# ruff: noqa: PLW2901, RET504
 
-    async def handle_async_init(self) -> None:
-        """Initialize the YouTube Music provider."""
-        logging.getLogger("yt_dlp").setLevel(self.logger.level + 10)
-        
-        # Check for authentication token
-        if not self.config.get_value(CONF_AUTH_TOKEN):
-            raise LoginFailed("Invalid login credentials")
-        
-        # Initialize headers and context
-        self._initialize_headers()
-        self._initialize_context()
-        
-        # Load cookies from file
-        self._cookies = self._load_cookies(CONF_COOKIE_FILE)
-        
-        # Check if the user has YouTube Music Premium
-        if not await self._user_has_ytm_premium():
-            raise LoginFailed("User does not have YouTube Music Premium")
-    
-    @property
-    def supported_features(self) -> tuple[ProviderFeature, ...]:
-        """Return the features supported by this provider."""
-        return SUPPORTED_FEATURES
-    
-    def _initialize_headers(self) -> None:
-        """Initialize the request headers for YouTube Music."""
-        auth_token = self.config.get_value(CONF_AUTH_TOKEN)
-        self._headers = {
-            "Authorization": f"Bearer {auth_token}",
-            "Accept-Language": SUPPORTED_LANGUAGES.get(self.mass.metadata.locale, "en"),
-        }
-
-    def _initialize_context(self) -> None:
-        """Initialize the request context for YouTube Music."""
-        self._context = yt_dlp.utils.Context()
-
-    def _load_cookies(self, cookies_file: str) -> dict:
-        """Load cookies from a file."""
-        if os.path.exists(cookies_file):
-            with open(cookies_file, 'r') as f:
-                return json.load(f)
-        return {}
-
-    async def _user_has_ytm_premium(self) -> bool:
-        """Check if the user has YouTube Music Premium."""
-        ytmusic = YTMusic(headers=self._headers, cookies=self._cookies)
-        try:
-            result = ytmusic.get_song(YTM_PREMIUM_CHECK_TRACK_ID)
-            return True
-        except Exception:
-            return False
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
@@ -109,9 +123,10 @@ async def setup(
     await prov.handle_async_init()
     return prov
 
+
 async def get_config_entries(
     mass: MusicAssistant,
-    instance_id: str | None = None,
+    instance_id: str | None = None,  # noqa: ARG001
     action: str | None = None,
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
@@ -122,24 +137,23 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    if action == "auth_action_key":  # Replace with your actual action key
+    if action == CONF_ACTION_AUTH:
         async with AuthenticationHelper(mass, values["session_id"]) as auth_helper:
-            token = await auth_helper.login_oauth()  # Replace with actual login function
+            token = await login_oauth(auth_helper)
             values[CONF_AUTH_TOKEN] = token["access_token"]
             values[CONF_REFRESH_TOKEN] = token["refresh_token"]
             values[CONF_EXPIRY_TIME] = token["expires_in"]
             values[CONF_TOKEN_TYPE] = token["token_type"]
-    
-    # Return the collected config entries
+    # return the collected config entries
     return (
         ConfigEntry(
             key=CONF_AUTH_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Authentication token for YouTube Music",
-            description="You need to link Music Assistant to your YouTube Music account. "
-                        "Please ignore the code on the next page and click 'Next'.",
-            action="auth_action_key",  # Replace with your actual action key
-            action_label="Authenticate on YouTube Music",
+            label="Authentication token for Youtube Music",
+            description="You need to link Music Assistant to your Youtube Music account. "
+            "Please ignore the code on the page the next page and click 'Next'.",
+            action=CONF_ACTION_AUTH,
+            action_label="Authenticate on Youtube Music",
             value=values.get(CONF_AUTH_TOKEN) if values else None,
         ),
         ConfigEntry(
@@ -152,7 +166,7 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_EXPIRY_TIME,
             type=ConfigEntryType.INTEGER,
-            label="Expiry time of auth token for YouTube Music",
+            label="Expiry time of auth token for Youtube Music",
             hidden=True,
             value=values.get(CONF_EXPIRY_TIME) if values else None,
         ),
@@ -164,6 +178,40 @@ async def get_config_entries(
             value=values.get(CONF_TOKEN_TYPE) if values else None,
         ),
     )
+
+
+class YoutubeMusicProvider(MusicProvider):
+    """Provider for Youtube Music."""
+
+    _headers = None
+    _context = None
+    _cookies = None
+    _cipher = None
+
+    async def handle_async_init(self) -> None:
+        """Set up the YTMusic provider."""
+        logging.getLogger("yt_dlp").setLevel(self.logger.level + 10)
+        if not self.config.get_value(CONF_AUTH_TOKEN):
+            msg = "Invalid login credentials"
+            raise LoginFailed(msg)
+        self._initialize_headers()
+        self._initialize_context()
+        self._cookies = {"CONSENT": "YES+1"}
+        # get default language (that is supported by YTM)
+        mass_locale = self.mass.metadata.locale
+        for lang_code in SUPPORTED_LANGUAGES:
+            if lang_code in (mass_locale, mass_locale.split("_")[0]):
+                self.language = lang_code
+                break
+        else:
+            self.language = "en"
+        if not await self._user_has_ytm_premium():
+            raise LoginFailed("User does not have Youtube Music Premium")
+
+    @property
+    def supported_features(self) -> tuple[ProviderFeature, ...]:
+        """Return the features supported by this Provider."""
+        return SUPPORTED_FEATURES
 
     async def search(
         self, search_query: str, media_types=list[MediaType], limit: int = 5
@@ -303,10 +351,11 @@ async def get_config_entries(
         msg = f"Item {prov_playlist_id} not found"
         raise MediaNotFoundError(msg)
 
-    async def get_playlist_tracks(
-        self, prov_playlist_id: str, offset: int, limit: int
-    ) -> list[Track]:
+    async def get_playlist_tracks(self, prov_playlist_id: str, page: int = 0) -> list[Track]:
         """Return playlist tracks for the given provider playlist id."""
+        if page > 0:
+            # paging not supported, we always return the whole list at once
+            return []
         await self._check_oauth_token()
         # Grab the playlist id from the full url in case of personal playlists
         if YT_PLAYLIST_ID_DELIMITER in prov_playlist_id:
@@ -323,20 +372,17 @@ async def get_config_entries(
             return None
         result = []
         # TODO: figure out how to handle paging in YTM
-        if offset:
-            # paging not supported, we always return the whole list at once
-            return []
         for index, track_obj in enumerate(playlist_obj["tracks"], 1):
             if track_obj["isAvailable"]:
                 # Playlist tracks sometimes do not have a valid artist id
                 # In that case, call the API for track details based on track id
                 try:
                     if track := self._parse_track(track_obj):
-                        track.position = index + 1
+                        track.position = index
                         result.append(track)
                 except InvalidDataError:
                     if track := await self.get_track(track_obj["videoId"]):
-                        track.position = index + 1
+                        track.position = index
                         result.append(track)
         # YTM doesn't seem to support paging so we ignore offset and limit
         return result
@@ -362,7 +408,8 @@ async def get_config_entries(
         artist_obj = await get_artist(prov_artist_id=prov_artist_id, headers=self._headers)
         if artist_obj.get("songs") and artist_obj["songs"].get("browseId"):
             prov_playlist_id = artist_obj["songs"]["browseId"]
-            return await self.get_playlist_tracks(prov_playlist_id, 0, 25)
+            playlist_tracks = await self.get_playlist_tracks(prov_playlist_id)
+            return playlist_tracks[:25]
         return []
 
     async def library_add(self, item: MediaItemType) -> bool:
@@ -524,7 +571,6 @@ async def get_config_entries(
             self.config.update({CONF_EXPIRY_TIME: time() + token["expires_in"]})
             self.config.update({CONF_TOKEN_TYPE: token["token_type"]})
             self._initialize_headers()
-            await self._update_ytdlp_oauth_token_cache()
 
     def _initialize_headers(self) -> dict[str, str]:
         """Return headers to include in the requests."""
@@ -666,7 +712,7 @@ async def get_config_entries(
                 playlist.owner = authors["name"]
         else:
             playlist.owner = self.instance_id
-        playlist.metadata.cache_checksum = playlist_obj.get("checksum")
+        playlist.cache_checksum = playlist_obj.get("checksum")
         return playlist
 
     def _parse_track(self, track_obj: dict) -> Track:
@@ -729,12 +775,14 @@ async def get_config_entries(
 
         def _extract_best_stream_url_format() -> dict[str, Any]:
             url = f"{YTM_DOMAIN}/watch?v={item_id}"
+            auth = (
+                f"{self.config.get_value(CONF_TOKEN_TYPE)} {self.config.get_value(CONF_AUTH_TOKEN)}"
+            )
             ydl_opts = {
                 "quiet": self.logger.level > logging.DEBUG,
-                # This enables the oauth2 plugin so we can grab the best
+                # This enables the access token plugin so we can grab the best
                 # available quality audio stream
-                "username": "oauth2",
-                "password": "",
+                "username": auth,
                 # This enforces a player client and skips unnecessary scraping to increase speed
                 "extractor_args": {
                     "youtube": {"skip": ["translated_subs", "dash"], "player_client": ["ios"]}
@@ -750,27 +798,6 @@ async def get_config_entries(
                 return stream_format
 
         return await asyncio.to_thread(_extract_best_stream_url_format)
-
-    async def _update_ytdlp_oauth_token_cache(self) -> None:
-        """Update the ytdlp token so we can grab the best available quality audio stream."""
-
-        def _update_oauth_cache() -> None:
-            ydl_opts = {
-                "quiet": self.logger.level > logging.DEBUG,
-                "username": "oauth2",
-                "password": "",
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                token_data = {
-                    "access_token": self.config.get_value(CONF_AUTH_TOKEN),
-                    "expires": self.config.get_value(CONF_EXPIRY_TIME),
-                    "token_type": self.config.get_value(CONF_TOKEN_TYPE),
-                    "refresh_token": self.config.get_value(CONF_REFRESH_TOKEN),
-                }
-                ydl.cache.store("youtube-oauth2", "token_data", token_data)
-                self.logger.debug("Updated ytdlp oauth token cache with new OAuth token.")
-
-        await asyncio.to_thread(_update_oauth_cache)
 
     def _get_item_mapping(self, media_type: MediaType, key: str, name: str) -> ItemMapping:
         return ItemMapping(
