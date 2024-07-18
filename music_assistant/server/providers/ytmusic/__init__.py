@@ -11,6 +11,7 @@ from urllib.parse import unquote
 
 import yt_dlp
 from ytmusicapi.constants import SUPPORTED_LANGUAGES
+from ytmusicapi import YTMusic
 
 from music_assistant.common.models.config_entries import ConfigEntry, ConfigValueType
 from music_assistant.common.models.enums import ConfigEntryType, ProviderFeature, StreamType
@@ -193,7 +194,7 @@ class YoutubeMusicProvider(MusicProvider):
             raise LoginFailed(msg)
         self._initialize_headers()
         self._initialize_context()
-        self._cookies = {"CONSENT": "YES+1"}
+        self._cookies = self._load_cookies('youtube_cookies.txt')  # Load cookies from file
         # get default language (that is supported by YTM)
         mass_locale = self.mass.metadata.locale
         for lang_code in SUPPORTED_LANGUAGES:
@@ -209,6 +210,35 @@ class YoutubeMusicProvider(MusicProvider):
     def supported_features(self) -> tuple[ProviderFeature, ...]:
         """Return the features supported by this Provider."""
         return SUPPORTED_FEATURES
+    
+    def _load_cookies(self, cookies_file: str) -> dict:
+        """Load cookies from a file."""
+        import json
+
+        with open(cookies_file, 'r') as file:
+            cookies = json.load(file)
+        
+        return cookies
+
+    def _initialize_headers(self) -> None:
+        """Initialize the request headers for YTMusic."""
+        self._headers = {
+            "Authorization": f"Bearer {self.config.get_value(CONF_AUTH_TOKEN)}",
+            "Accept-Language": self.language,
+        }
+
+    def _initialize_context(self) -> None:
+        """Initialize the request context for YTMusic."""
+        self._context = yt_dlp.utils.Context()
+
+    async def _user_has_ytm_premium(self) -> bool:
+        """Check if the user has YTM Premium."""
+        ytmusic = YTMusic(headers=self._headers, cookies=self._cookies)
+        try:
+            result = ytmusic.get_song(YTM_PREMIUM_CHECK_TRACK_ID)
+            return True
+        except Exception:
+            return False
 
     async def search(
         self, search_query: str, media_types=list[MediaType], limit: int = 5
