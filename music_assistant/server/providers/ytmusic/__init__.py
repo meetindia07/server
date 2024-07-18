@@ -1,64 +1,21 @@
-"""Youtube Music support for MusicAssistant."""
+"""YouTube Music support for MusicAssistant."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
-from time import time
-from typing import TYPE_CHECKING, Any
-from urllib.parse import unquote
+import os
+from typing import TYPE_CHECKING
 
 import yt_dlp
 from ytmusicapi.constants import SUPPORTED_LANGUAGES
 from ytmusicapi import YTMusic
 
 from music_assistant.common.models.config_entries import ConfigEntry, ConfigValueType
-from music_assistant.common.models.enums import ConfigEntryType, ProviderFeature, StreamType
-from music_assistant.common.models.errors import (
-    InvalidDataError,
-    LoginFailed,
-    MediaNotFoundError,
-    UnplayableMediaError,
-)
-from music_assistant.common.models.media_items import (
-    Album,
-    AlbumType,
-    Artist,
-    AudioFormat,
-    ContentType,
-    ImageType,
-    ItemMapping,
-    MediaItemImage,
-    MediaItemType,
-    MediaType,
-    Playlist,
-    ProviderMapping,
-    SearchResults,
-    Track,
-)
-from music_assistant.common.models.streamdetails import StreamDetails
+from music_assistant.common.models.enums import ConfigEntryType, ProviderFeature
+from music_assistant.common.models.errors import LoginFailed
 from music_assistant.server.helpers.auth import AuthenticationHelper
 from music_assistant.server.models.music_provider import MusicProvider
-
-from .helpers import (
-    add_remove_playlist_tracks,
-    get_album,
-    get_artist,
-    get_library_albums,
-    get_library_artists,
-    get_library_playlists,
-    get_library_tracks,
-    get_playlist,
-    get_song_radio_tracks,
-    get_track,
-    library_add_remove_album,
-    library_add_remove_artist,
-    library_add_remove_playlist,
-    login_oauth,
-    refresh_oauth_token,
-    search,
-)
 
 if TYPE_CHECKING:
     from music_assistant.common.models.config_entries import ProviderConfig
@@ -66,34 +23,11 @@ if TYPE_CHECKING:
     from music_assistant.server import MusicAssistant
     from music_assistant.server.models import ProviderInstanceType
 
-
-CONF_COOKIE = "cookie"
-CONF_ACTION_AUTH = "auth"
 CONF_AUTH_TOKEN = "auth_token"
 CONF_REFRESH_TOKEN = "refresh_token"
-CONF_TOKEN_TYPE = "token_type"
 CONF_EXPIRY_TIME = "expiry_time"
-
-YTM_DOMAIN = "https://music.youtube.com"
-YTM_BASE_URL = f"{YTM_DOMAIN}/youtubei/v1/"
-VARIOUS_ARTISTS_YTM_ID = "UCUTXlgdcKU5vfzFqHOWIvkA"
-YT_PLAYLIST_ID_DELIMITER = "🎵"
-YT_PERSONAL_PLAYLISTS = (
-    "LM",  # Liked songs
-    "RDTMAK5uy_kset8DisdE7LSD4TNjEVvrKRTmG7a56sY",  # SuperMix
-    "RDTMAK5uy_nGQKSMIkpr4o9VI_2i56pkGliD6FQRo50",  # My Mix 1
-    "RDTMAK5uy_lz2owBgwWf1mjzyn_NbxzMViQzIg8IAIg",  # My Mix 2
-    "RDTMAK5uy_k5UUl0lmrrfrjMpsT0CoMpdcBz1ruAO1k",  # My Mix 3
-    "RDTMAK5uy_nTsa0Irmcu2li2-qHBoZxtrpG9HuC3k_Q",  # My Mix 4
-    "RDTMAK5uy_lfZhS7zmIcmUhsKtkWylKzc0EN0LW90-s",  # My Mix 5
-    "RDTMAK5uy_k78ni6Y4fyyl0r2eiKkBEICh9Q5wJdfXk",  # My Mix 6
-    "RDTMAK5uy_lfhhWWw9v71CPrR7MRMHgZzbH6Vku9iJc",  # My Mix 7
-    "RDTMAK5uy_n_5IN6hzAOwdCnM8D8rzrs3vDl12UcZpA",  # Discover Mix
-    "RDTMAK5uy_lr0LWzGrq6FU9GIxWvFHTRPQD2LHMqlFA",  # New Release Mix
-    "RDTMAK5uy_nilrsVWxrKskY0ZUpVZ3zpB0u4LwWTVJ4",  # Replay Mix
-    "RDTMAK5uy_mZtXeU08kxXJOUhL0ETdAuZTh1z7aAFAo",  # Archive Mix
-)
-YTM_PREMIUM_CHECK_TRACK_ID = "dQw4w9WgXcQ"
+CONF_TOKEN_TYPE = "token_type"
+CONF_COOKIE_FILE = "youtube_cookies.txt"
 
 SUPPORTED_FEATURES = (
     ProviderFeature.LIBRARY_ARTISTS,
@@ -107,9 +41,64 @@ SUPPORTED_FEATURES = (
     ProviderFeature.SIMILAR_TRACKS,
 )
 
-# TODO: fix disabled tests
-# ruff: noqa: PLW2901, RET504
+class YoutubeMusicProvider(MusicProvider):
+    """Provider for YouTube Music."""
 
+    _headers = None
+    _cookies = None
+    _context = None
+
+    async def handle_async_init(self) -> None:
+        """Initialize the YouTube Music provider."""
+        logging.getLogger("yt_dlp").setLevel(self.logger.level + 10)
+        
+        # Check for authentication token
+        if not self.config.get_value(CONF_AUTH_TOKEN):
+            raise LoginFailed("Invalid login credentials")
+        
+        # Initialize headers and context
+        self._initialize_headers()
+        self._initialize_context()
+        
+        # Load cookies from file
+        self._cookies = self._load_cookies(CONF_COOKIE_FILE)
+        
+        # Check if the user has YouTube Music Premium
+        if not await self._user_has_ytm_premium():
+            raise LoginFailed("User does not have YouTube Music Premium")
+    
+    @property
+    def supported_features(self) -> tuple[ProviderFeature, ...]:
+        """Return the features supported by this provider."""
+        return SUPPORTED_FEATURES
+    
+    def _initialize_headers(self) -> None:
+        """Initialize the request headers for YouTube Music."""
+        auth_token = self.config.get_value(CONF_AUTH_TOKEN)
+        self._headers = {
+            "Authorization": f"Bearer {auth_token}",
+            "Accept-Language": SUPPORTED_LANGUAGES.get(self.mass.metadata.locale, "en"),
+        }
+
+    def _initialize_context(self) -> None:
+        """Initialize the request context for YouTube Music."""
+        self._context = yt_dlp.utils.Context()
+
+    def _load_cookies(self, cookies_file: str) -> dict:
+        """Load cookies from a file."""
+        if os.path.exists(cookies_file):
+            with open(cookies_file, 'r') as f:
+                return json.load(f)
+        return {}
+
+    async def _user_has_ytm_premium(self) -> bool:
+        """Check if the user has YouTube Music Premium."""
+        ytmusic = YTMusic(headers=self._headers, cookies=self._cookies)
+        try:
+            result = ytmusic.get_song(YTM_PREMIUM_CHECK_TRACK_ID)
+            return True
+        except Exception:
+            return False
 
 async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
@@ -119,10 +108,9 @@ async def setup(
     await prov.handle_async_init()
     return prov
 
-
 async def get_config_entries(
     mass: MusicAssistant,
-    instance_id: str | None = None,  # noqa: ARG001
+    instance_id: str | None = None,
     action: str | None = None,
     values: dict[str, ConfigValueType] | None = None,
 ) -> tuple[ConfigEntry, ...]:
@@ -133,23 +121,24 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    if action == CONF_ACTION_AUTH:
+    if action == "auth_action_key":  # Replace with your actual action key
         async with AuthenticationHelper(mass, values["session_id"]) as auth_helper:
             token = await login_oauth(auth_helper)
             values[CONF_AUTH_TOKEN] = token["access_token"]
             values[CONF_REFRESH_TOKEN] = token["refresh_token"]
             values[CONF_EXPIRY_TIME] = token["expires_in"]
             values[CONF_TOKEN_TYPE] = token["token_type"]
-    # return the collected config entries
+    
+    # Return the collected config entries
     return (
         ConfigEntry(
             key=CONF_AUTH_TOKEN,
             type=ConfigEntryType.SECURE_STRING,
-            label="Authentication token for Youtube Music",
-            description="You need to link Music Assistant to your Youtube Music account. "
-            "Please ignore the code on the next page and click 'Next'.",
-            action=CONF_ACTION_AUTH,
-            action_label="Authenticate on Youtube Music",
+            label="Authentication token for YouTube Music",
+            description="You need to link Music Assistant to your YouTube Music account. "
+                        "Please ignore the code on the next page and click 'Next'.",
+            action="auth_action_key",  # Replace with your actual action key
+            action_label="Authenticate on YouTube Music",
             value=values.get(CONF_AUTH_TOKEN) if values else None,
         ),
         ConfigEntry(
@@ -162,7 +151,7 @@ async def get_config_entries(
         ConfigEntry(
             key=CONF_EXPIRY_TIME,
             type=ConfigEntryType.INTEGER,
-            label="Expiry time of auth token for Youtube Music",
+            label="Expiry time of auth token for YouTube Music",
             hidden=True,
             value=values.get(CONF_EXPIRY_TIME) if values else None,
         ),
@@ -174,69 +163,6 @@ async def get_config_entries(
             value=values.get(CONF_TOKEN_TYPE) if values else None,
         ),
     )
-
-
-class YoutubeMusicProvider(MusicProvider):
-    """Provider for Youtube Music."""
-
-    _headers = None
-    _context = None
-    _cookies = None
-    _cipher = None
-
-    async def handle_async_init(self) -> None:
-        """Set up the YTMusic provider."""
-        logging.getLogger("yt_dlp").setLevel(self.logger.level + 10)
-        if not self.config.get_value(CONF_AUTH_TOKEN):
-            msg = "Invalid login credentials"
-            raise LoginFailed(msg)
-        self._initialize_headers()
-        self._initialize_context()
-        self._cookies = self._load_cookies('youtube_cookies.txt')  # Load cookies from file
-        # get default language (that is supported by YTM)
-        mass_locale = self.mass.metadata.locale
-        for lang_code in SUPPORTED_LANGUAGES:
-            if lang_code in (mass_locale, mass_locale.split("_")[0]):
-                self.language = lang_code
-                break
-        else:
-            self.language = "en"
-        if not await self._user_has_ytm_premium():
-            raise LoginFailed("User does not have Youtube Music Premium")
-
-    @property
-    def supported_features(self) -> tuple[ProviderFeature, ...]:
-        """Return the features supported by this Provider."""
-        return SUPPORTED_FEATURES
-    
-    def _load_cookies(self, cookies_file: str) -> dict:
-        """Load cookies from a file."""
-        import json
-
-        with open(cookies_file, 'r') as file:
-            cookies = json.load(file)
-        
-        return cookies
-
-    def _initialize_headers(self) -> None:
-        """Initialize the request headers for YTMusic."""
-        self._headers = {
-            "Authorization": f"Bearer {self.config.get_value(CONF_AUTH_TOKEN)}",
-            "Accept-Language": self.language,
-        }
-
-    def _initialize_context(self) -> None:
-        """Initialize the request context for YTMusic."""
-        self._context = yt_dlp.utils.Context()
-
-    async def _user_has_ytm_premium(self) -> bool:
-        """Check if the user has YTM Premium."""
-        ytmusic = YTMusic(headers=self._headers, cookies=self._cookies)
-        try:
-            result = ytmusic.get_song(YTM_PREMIUM_CHECK_TRACK_ID)
-            return True
-        except Exception:
-            return False
 
     async def search(
         self, search_query: str, media_types=list[MediaType], limit: int = 5
