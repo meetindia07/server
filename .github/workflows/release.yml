@@ -127,7 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Update changelog and release notes including frontend notes
-        uses: music-assistant/release-notes-merge-action@main
+        uses: meetindia07/release-notes-merge-action@main
         with:
           github_token: ${{ secrets.PRIVILEGED_GITHUB_TOKEN }}
           release_tag: ${{ needs.build-and-publish-pypi.outputs.version }}
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Push new version number to addon config
-        uses: music-assistant/addon-update-action@main
+        uses: meetindia07/addon-update-action@main
         with:
           github_token: ${{ secrets.PRIVILEGED_GITHUB_TOKEN }}
           new_server_version: ${{ needs.build-and-publish-pypi.outputs.version }}
