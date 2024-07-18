@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import json
 from typing import TYPE_CHECKING
 
 import yt_dlp
@@ -123,7 +124,7 @@ async def get_config_entries(
     """
     if action == "auth_action_key":  # Replace with your actual action key
         async with AuthenticationHelper(mass, values["session_id"]) as auth_helper:
-            token = await login_oauth(auth_helper)
+            token = await auth_helper.login_oauth()  # Replace with actual login function
             values[CONF_AUTH_TOKEN] = token["access_token"]
             values[CONF_REFRESH_TOKEN] = token["refresh_token"]
             values[CONF_EXPIRY_TIME] = token["expires_in"]
