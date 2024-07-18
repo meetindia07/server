@@ -77,8 +77,6 @@ CONF_EXPIRY_TIME = "expiry_time"
 YTM_DOMAIN = "https://music.youtube.com"
 YTM_BASE_URL = f"{YTM_DOMAIN}/youtubei/v1/"
 VARIOUS_ARTISTS_YTM_ID = "UCUTXlgdcKU5vfzFqHOWIvkA"
-# Playlist ID's are not unique across instances for lists like 'Liked videos', 'SuperMix' etc.
-# So we need to add a delimiter to make them unique
 YT_PLAYLIST_ID_DELIMITER = "🎵"
 YT_PERSONAL_PLAYLISTS = (
     "LM",  # Liked songs
@@ -149,7 +147,7 @@ async def get_config_entries(
             type=ConfigEntryType.SECURE_STRING,
             label="Authentication token for Youtube Music",
             description="You need to link Music Assistant to your Youtube Music account. "
-            "Please ignore the code on the page the next page and click 'Next'.",
+            "Please ignore the code on the next page and click 'Next'.",
             action=CONF_ACTION_AUTH,
             action_label="Authenticate on Youtube Music",
             value=values.get(CONF_AUTH_TOKEN) if values else None,
