@@ -45,3 +45,4 @@ yt-dlp==2024.7.9
 yt-dlp-youtube-accesstoken==0.1.1
 ytmusicapi==1.7.5
 zeroconf==0.132.2
+"requirements": ["ytmusicapi==1.6.0", "git+https://github.com/MarvinSchenkel/pytube.git"],
