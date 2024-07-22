@@ -4,10 +4,10 @@
   "name": "YouTube Music",
   "description": "Support for the YouTube Music streaming provider in Music Assistant.",
   "codeowners": ["@MarvinSchenkel"],
-  "requirements": ["ytmusicapi==1.7.0", "yt-dlp==2023.07.06"],
+  "requirements": ["ytmusicapi==1.7.5", "yt-dlp-youtube-accesstoken==0.1.1", "yt-dlp==2024.7.9"],
   "documentation": "https://music-assistant.io/music-providers/youtube-music/",
   "multi_instance": true,
   "config": {
-    "cookie_file": "/root/youtube_music_cookies.txt"
+    "cookie_file": "/path/youtube_music_cookies.txt"
   }
 }
