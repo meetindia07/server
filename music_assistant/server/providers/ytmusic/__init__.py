@@ -814,7 +814,7 @@ class YoutubeMusicProvider(MusicProvider):
             artist_id = VARIOUS_ARTISTS_YTM_ID
         return self._get_item_mapping(MediaType.ARTIST, artist_id, artist_obj.get("name"))
 
-    async def _user_has_ytm_premium(self) -> bool:
+   async def _user_has_ytm_premium(self) -> bool:
     """Check if the user has YouTube Music Premium."""
     try:
         stream_format = await self._get_stream_format(YTM_PREMIUM_CHECK_TRACK_ID)
@@ -826,38 +826,37 @@ class YoutubeMusicProvider(MusicProvider):
     except Exception as e:
         self.logger.error(f"Unexpected error checking YouTube Music Premium status: {e}")
         return False
-        
-    def _parse_thumbnails(self, thumbnails_obj: dict) -> list[MediaItemImage]:
-        """Parse and YTM thumbnails to MediaItemImage."""
-        result: list[MediaItemImage] = []
-        processed_images = set()
-        for img in sorted(thumbnails_obj, key=lambda w: w.get("width", 0), reverse=True):
-            url: str = img["url"]
-            url_base = url.split("=w")[0]
-            width: int = img["width"]
-            height: int = img["height"]
-            image_ratio: float = width / height
-            image_type = (
-                ImageType.LANDSCAPE
-                if "maxresdefault" in url or image_ratio > 2.0
-                else ImageType.THUMB
-            )
-            if "=w" not in url and width < 500:
-                continue
-            # if the size is in the url, we can actually request a higher thumb
-            if "=w" in url and width < 600:
-                url = f"{url_base}=w600-h600-p"
-                image_type = ImageType.THUMB
-            if (url_base, image_type) in processed_images:
-                continue
-            processed_images.add((url_base, image_type))
-            result.append(
-                MediaItemImage(
-                    type=image_type,
-                    path=url,
-                    provider=self.instance_id,
-                    remotely_accessible=True,
-                )
-            )
-        return result
 
+def _parse_thumbnails(self, thumbnails_obj: dict) -> list[MediaItemImage]:
+    """Parse and YTM thumbnails to MediaItemImage."""
+    result: list[MediaItemImage] = []
+    processed_images = set()
+    for img in sorted(thumbnails_obj, key=lambda w: w.get("width", 0), reverse=True):
+        url: str = img["url"]
+        url_base = url.split("=w")[0]
+        width: int = img["width"]
+        height: int = img["height"]
+        image_ratio: float = width / height
+        image_type = (
+            ImageType.LANDSCAPE
+            if "maxresdefault" in url or image_ratio > 2.0
+            else ImageType.THUMB
+        )
+        if "=w" not in url and width < 500:
+            continue
+        # if the size is in the url, we can actually request a higher thumb
+        if "=w" in url and width < 600:
+            url = f"{url_base}=w600-h600-p"
+            image_type = ImageType.THUMB
+        if (url_base, image_type) in processed_images:
+            continue
+        processed_images.add((url_base, image_type))
+        result.append(
+            MediaItemImage(
+                type=image_type,
+                path=url,
+                provider=self.instance_id,
+                remotely_accessible=True,
+            )
+        )
+    return result
